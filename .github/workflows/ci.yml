@@ -1,4 +1,6 @@
-name: BugTrack Pro CI
+
+
+name: BugTrack Pro CI-CD
 
 on:
   push:
@@ -13,16 +15,125 @@ jobs:
   test:
     name: Run automated tests
     runs-on: ubuntu-latest
+
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
       - name: Check Python syntax
         run: python -m compileall -q app.py tests
+
       - name: Run tests
         run: python -m pytest -v
+
+  deploy:
+    name: Deploy to PythonAnywhere
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deployment dependency
+        run: python -m pip install requests
+
+      - name: Upload app and reload website
+        env:
+          PA_USERNAME: ${{ secrets.PYTHONANYWHERE_USERNAME }}
+          PA_API_TOKEN: ${{ secrets.PYTHONANYWHERE_API_TOKEN }}
+          PA_DOMAIN: ${{ secrets.PYTHONANYWHERE_DOMAIN }}
+          PA_APP_PATH: /home/Nilesh24/BugTrack-Pro
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import posixpath
+          from urllib.parse import quote
+          import requests
+
+          username = os.environ["PA_USERNAME"]
+          token = os.environ["PA_API_TOKEN"]
+          domain = os.environ["PA_DOMAIN"]
+          app_path = os.environ["PA_APP_PATH"]
+
+          if not all([username, token, domain]):
+              raise SystemExit("Required PythonAnywhere GitHub secrets are missing.")
+
+          headers = {"Authorization": f"Token {token}"}
+
+          tracked_files = subprocess.check_output(
+              ["git", "ls-files", "-z"]
+          ).decode("utf-8").split("\0")
+
+          deploy_files = [
+              path for path in tracked_files
+              if path and (
+                  path == "app.py"
+                  or path == "requirements.txt"
+                  or path.startswith("templates/")
+                  or path.startswith("static/")
+              )
+              and os.path.isfile(path)
+          ]
+
+          if not deploy_files:
+              raise SystemExit("No application files found to deploy.")
+
+          for relative_path in deploy_files:
+              remote_path = posixpath.join(app_path, relative_path)
+              upload_url = (
+                  "https://www.pythonanywhere.com/api/v0/user/"
+                  + quote(username, safe="")
+                  + "/files/path"
+                  + quote(remote_path, safe="/")
+              )
+
+              with open(relative_path, "rb") as local_file:
+                  response = requests.post(
+                      upload_url,
+                      headers=headers,
+                      files={
+                          "content": (
+                              os.path.basename(relative_path),
+                              local_file
+                          )
+                      },
+                      timeout=60
+                  )
+
+              response.raise_for_status()
+              print(f"Uploaded: {relative_path}")
+
+          reload_url = (
+              "https://www.pythonanywhere.com/api/v0/user/"
+              + quote(username, safe="")
+              + "/webapps/"
+              + quote(domain, safe="")
+              + "/reload/"
+          )
+
+          response = requests.post(
+              reload_url,
+              headers=headers,
+              timeout=60
+          )
+          response.raise_for_status()
+
+          print("PythonAnywhere reload request successful.")
+          PY
+
